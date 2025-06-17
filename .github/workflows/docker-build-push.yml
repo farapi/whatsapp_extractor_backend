@@ -1,0 +1,49 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: whatsapp_parser
+  ECR_REGISTRY: 024881612673.dkr.ecr.eu-west-1.amazonaws.com
+
+jobs:
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    # Only run on main branch push or when PR is merged to main
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          # You'll need to add these secrets in your GitHub repository
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        working-directory: .
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
+          docker tag ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
