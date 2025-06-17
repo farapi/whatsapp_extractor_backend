@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -7,6 +8,10 @@ import os
 load_dotenv()
 
 app = FastAPI()
+
+@app.get("/health")
+async def health_check():
+    return JSONResponse(content={"status": "ok"}, status_code=200)
 
 # Configure CORS - Allow requests from any origin in development
 app.add_middleware(
