@@ -1,28 +1,28 @@
 from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai
-from dotenv import load_dotenv
 import os
-
-load_dotenv()
+from zip_handler import ZipFileHandler
+from gemini_service import GeminiService
 
 app = FastAPI()
+
+# Initialize services
+gemini_service = GeminiService()
 
 @app.get("/health")
 async def health_check():
     return JSONResponse(content={"status": "ok"}, status_code=200)
 
-# Configure CORS - Allow requests from any origin in development
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Add exception handler for better error messages
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     print(f"Error processing request: {str(exc)}")
@@ -31,27 +31,14 @@ async def global_exception_handler(request, exc):
         content={"detail": f"An error occurred: {str(exc)}"},
     )
 
-# Configure Gemini
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    raise ValueError("GEMINI_API_KEY environment variable is not set")
-
-genai.configure(api_key=api_key)
-
-# Initialize the model
-# Available models are typically:
-# - models/gemini-pro
-# - models/gemini-pro-vision
-model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
-
-# Test the model with a simple query to verify it works
+# Test the Gemini service connection
 try:
     print("\nTesting Gemini API connection...")
-    response = model.generate_content("Hello, are you working?")
+    response = gemini_service.model.generate_content("Hello, are you working?")
     print(f"API Test Response: {response.text}")
     print("Gemini API connection successful!")
 except Exception as e:
-    print(f"\nError testing Gemini API: {str(e)}")
+    print(f"Error testing Gemini API: {str(e)}")
     raise
 
 def clean_text_content(content: str) -> str:
@@ -67,7 +54,7 @@ def retry_generate_content(prompt: str, max_retries: int = 3):
     import time
     for attempt in range(max_retries):
         try:
-            response = model.generate_content(prompt)
+            response = gemini_service.model.generate_content(prompt)
             return response
         except Exception as e:
             if attempt == max_retries - 1:
@@ -119,9 +106,6 @@ def parse_whatsapp_chat(content: str):
     full_prompt = prompt + "\n\nChat content:\n" + cleaned_content
     
     # Try to generate content with retries
-    # Clean the content first
-    cleaned_content = clean_text_content(content)
-    
     try:
         # Generate content with safety settings
         safety_settings = {
@@ -131,7 +115,7 @@ def parse_whatsapp_chat(content: str):
             "DANGEROUS_CONTENT": "block_none"
         }
         
-        response = model.generate_content(
+        response = gemini_service.model.generate_content(
             prompt + "\n\nChat content:\n" + cleaned_content,
             generation_config={
                 "temperature": 0.1,  # More deterministic
@@ -200,47 +184,44 @@ def parse_whatsapp_chat(content: str):
         print(f"Error processing response: {str(e)}\nResponse: {response.text if 'response' in locals() else 'No response generated'}")
         raise ValueError(f"Failed to process model response: {str(e)}")
 
-@app.post("/api/process-chat")
+@app.post("/process-chat")
 async def process_chat(file: UploadFile):
-    print(f"Received file: {file.filename}, Content-Type: {file.content_type}")
-    
-    if not file.filename.endswith('.txt'):
-        raise HTTPException(status_code=400, detail="Only .txt files are allowed")
-    
+    if not file.filename.endswith('.zip'):
+        raise HTTPException(status_code=400, detail="Please upload a zip file")
+
+    temp_zip_path = None
+    zip_handler = None
+
     try:
-        content = await file.read()
-        print(f"Read {len(content)} bytes from file")
+        # Save the uploaded zip file temporarily
+        temp_zip_path = f"temp_{file.filename}"
+        with open(temp_zip_path, "wb") as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+
+        # Process the zip file
+        zip_handler = ZipFileHandler(temp_zip_path)
         
-        # Try different encodings
-        for encoding in ['utf-8', 'utf-16', 'utf-8-sig', 'cp1256', 'iso-8859-1']:
-            try:
-                chat_content = content.decode(encoding)
-                print(f"Successfully decoded file using {encoding} encoding")
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Could not decode file content. Please ensure it's a valid text file."
-            )
-            
-        # Process the content
-        try:
-            result = parse_whatsapp_chat(chat_content)
-            print(f"Successfully extracted {len(result)} properties")
-            return result
-        except Exception as e:
-            print(f"Error processing chat content: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Error processing chat content: {str(e)}")
-            
+        # Get the chat file
+        chat_file_path = zip_handler.get_chat_file()
+        if not chat_file_path:
+            raise HTTPException(status_code=400, detail="No chat file found in the zip")
+
+        # Read the chat file content
+        with open(chat_file_path, 'r', encoding='utf-8') as f:
+            chat_content = f.read()
+
+        # Parse and analyze the chat using Gemini
+        properties = gemini_service.parse_whatsapp_chat(chat_content)
+        
+        return {"properties": properties}
+
     except Exception as e:
-        print(f"Error handling file: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error handling file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
     
-    try:
-        result = parse_whatsapp_chat(chat_content)
-        return result
-    except Exception as e:
-        print(f"Error processing chat: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to process chat: {str(e)}")
+    finally:
+        # Ensure cleanup happens no matter what
+        if zip_handler:
+            zip_handler.cleanup()
+        if temp_zip_path and os.path.exists(temp_zip_path):
+            os.remove(temp_zip_path)
